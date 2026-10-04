@@ -67,7 +67,7 @@ export class WebhookServer extends EventEmitter {
     super();
     this.db = options.db;
     this.clickup = options.clickup;
-    this.requestedPort = options.port ?? (process.env.PORT ? Number(process.env.PORT) : 3000);
+    this.requestedPort = options.port ?? (process.env.PORT ? Number(process.env.PORT) : 3456);
   }
 
   /**

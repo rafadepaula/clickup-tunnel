@@ -30,6 +30,19 @@ describe('WebhookServer', () => {
       expect(() => server.getPort()).toThrow('Server is not running');
     });
 
+    it('defaults to port 3456 when port option and process.env.PORT are not set', () => {
+      const origPort = process.env.PORT;
+      delete process.env.PORT;
+      try {
+        const s = new WebhookServer({ db, clickup });
+        expect((s as any).requestedPort).toBe(3456);
+      } finally {
+        if (origPort !== undefined) {
+          process.env.PORT = origPort;
+        }
+      }
+    });
+
     it('starts listening on an assigned port and getPort returns it', async () => {
       server = new WebhookServer({ db, clickup, port: 0 });
       const assignedPort = await server.start();
