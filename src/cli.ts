@@ -307,16 +307,16 @@ export async function startDaemon(
       throw new Error('Provided tunnelManager does not implement start or startQuickTunnel');
     }
   } else {
-    // Default to ngrok because ClickUp blocks trycloudflare.com (ECODE: OAUTH_194)
-    const useCloudflared = options.tunnel === 'cloudflared';
-    if (useCloudflared) {
-      const cfManager = new TunnelManager();
-      tunnelManager = cfManager;
-      tunnelUrl = await cfManager.startQuickTunnel(listeningPort);
-    } else {
+    // Default to cloudflared (can override with --tunnel ngrok)
+    const useNgrok = options.tunnel === 'ngrok';
+    if (useNgrok) {
       const ngrokMgr = new NgrokManager();
       tunnelManager = ngrokMgr;
       tunnelUrl = await ngrokMgr.start(listeningPort);
+    } else {
+      const cfManager = new TunnelManager();
+      tunnelManager = cfManager;
+      tunnelUrl = await cfManager.startQuickTunnel(listeningPort);
     }
   }
 
@@ -334,14 +334,24 @@ export async function startDaemon(
     if (err?.message?.includes('Specified URL not allowed')) {
       throw new Error(
         `ClickUp rejected webhook URL '${webhookEndpoint}' (Specified URL not allowed). ` +
-        `Note: ClickUp explicitly blocklists trycloudflare.com domains. ` +
-        `Use ngrok (default) or provide a custom domain via --url.`
+        `If using Cloudflare Quick Tunnel, ClickUp may reject certain domains. ` +
+        `Try ngrok via --tunnel ngrok or provide a custom domain via --url.`
       );
     }
     throw err;
   }
   const webhookId = webhook.id;
   const dbDisplay = resolveDbPathDisplay(options.db);
+
+  // Persist live daemon state in SQLite so standalone MCP servers report real active status
+  db.setDaemonState({
+    active: true,
+    pid: process.pid,
+    tunnel_url: tunnelUrl,
+    webhook_id: webhookId,
+    team_id: teamId,
+    port: listeningPort,
+  });
 
   // Pretty prints status banner
   console.log(`
@@ -380,6 +390,19 @@ export async function startDaemon(
 
     console.log('\n[Daemon] Gracefully shutting down clickup-tunnel...');
 
+    try {
+      db.setDaemonState({
+        active: false,
+        pid: process.pid,
+        tunnel_url: null,
+        webhook_id: null,
+        team_id: null,
+        port: 0,
+      });
+    } catch {
+      // ignore
+    }
+
     if (webhookId) {
       try {
         console.log(`[Daemon] Deregistering webhook ${webhookId} from ClickUp...`);
@@ -391,7 +414,7 @@ export async function startDaemon(
 
     if (tunnelManager) {
       try {
-        console.log('[Daemon] Stopping Cloudflare tunnel...');
+        console.log('[Daemon] Stopping tunnel...');
         await tunnelManager.stop();
       } catch (err: any) {
         console.error('[Daemon] Error stopping tunnel:', err?.message || err);

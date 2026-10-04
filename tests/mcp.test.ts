@@ -195,6 +195,44 @@ describe('ClickUpTunnelMcpServer', () => {
       expect(frontendTasks).toHaveLength(1);
       expect(frontendTasks[0].task_id).toBe('task_frontend');
     });
+
+    it('deduplicates multiple pending events for the same task and returns token-optimized task list', async () => {
+      db.saveTask({
+        id: 'task_dup',
+        name: 'Deduplicated Task',
+        status: 'to do',
+        tags: ['mcp-test'],
+        description: 'Testing token optimization',
+        url: 'https://app.clickup.com/t/task_dup',
+        list_id: null,
+        list_name: null,
+        raw_json: '{}',
+        created_at: 1700000000000,
+      });
+
+      // Insert 6 events for this single task
+      for (let i = 1; i <= 6; i++) {
+        db.insertEvent('task_dup', i === 1 ? 'taskCreated' : 'taskUpdated', [
+          { huge_nested_quill_delta: 'should not be returned in get_pending_tasks' },
+        ]);
+      }
+
+      server = new ClickUpTunnelMcpServer(db);
+      client = await createConnectedClient(server);
+
+      const result = await client.callTool({
+        name: 'get_pending_tasks',
+        arguments: {},
+      });
+
+      const tasks = JSON.parse((result.content[0] as { type: 'text'; text: string }).text);
+      expect(tasks).toHaveLength(1); // Exactly 1 item instead of 6 duplicate items!
+      expect(tasks[0].task_id).toBe('task_dup');
+      expect(tasks[0].name).toBe('Deduplicated Task');
+      expect(tasks[0].event_count).toBe(6);
+      expect(tasks[0].event_ids).toHaveLength(6);
+      expect(tasks[0].history_items).toBeUndefined(); // History stripped for token economy!
+    });
   });
 
   describe('Tool: mark_task_processed', () => {
@@ -297,6 +335,42 @@ describe('ClickUpTunnelMcpServer', () => {
       expect(result.isError).toBeFalsy();
       const events = db.listRecentEvents(10);
       expect(events[0].processing_status).toBe('ignored');
+    });
+
+    it('marks all pending events for a task at once when task_id is provided', async () => {
+      db.saveTask({
+        id: 'task_bulk_clear',
+        name: 'Bulk Clear Task',
+        status: 'open',
+        tags: [],
+        description: null,
+        url: null,
+        list_id: null,
+        list_name: null,
+        raw_json: '{}',
+        created_at: 1700000000000,
+      });
+
+      for (let i = 1; i <= 5; i++) {
+        db.insertEvent('task_bulk_clear', 'taskUpdated', []);
+      }
+
+      expect(db.getPendingCount()).toBe(5);
+
+      server = new ClickUpTunnelMcpServer(db);
+      client = await createConnectedClient(server);
+
+      const result = await client.callTool({
+        name: 'mark_task_processed',
+        arguments: { task_id: 'task_bulk_clear', status: 'processed', notes: 'Done by agent' },
+      });
+
+      expect(result.isError).toBeFalsy();
+      const text = (result.content[0] as { type: 'text'; text: string }).text;
+      expect(text).toContain('Successfully marked 5 pending event(s) for task #task_bulk_clear as \'processed\'');
+
+      // All pending events are now processed
+      expect(db.getPendingCount()).toBe(0);
     });
 
     it('returns error when event_id does not exist', async () => {
@@ -582,6 +656,31 @@ describe('ClickUpTunnelMcpServer', () => {
       const status2 = JSON.parse((res2.content[0] as { type: 'text'; text: string }).text);
       expect(status2.active).toBe(false);
       expect(status2.tunnel_url).toBeNull();
+    });
+
+    it('reads active daemon state persisted in SQLite database', async () => {
+      db.setDaemonState({
+        active: true,
+        pid: process.pid,
+        tunnel_url: 'https://persisted-tunnel.trycloudflare.com',
+        webhook_id: 'wh_persisted_123',
+        team_id: 'team_persisted',
+        port: 3456,
+      });
+
+      server = new ClickUpTunnelMcpServer(db);
+      client = await createConnectedClient(server);
+
+      const result = await client.callTool({
+        name: 'get_tunnel_status',
+        arguments: {},
+      });
+
+      const status = JSON.parse((result.content[0] as { type: 'text'; text: string }).text);
+      expect(status.active).toBe(true);
+      expect(status.tunnel_url).toBe('https://persisted-tunnel.trycloudflare.com');
+      expect(status.webhook_id).toBe('wh_persisted_123');
+      expect(status.team_id).toBe('team_persisted');
     });
   });
 

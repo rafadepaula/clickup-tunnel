@@ -79,6 +79,12 @@ export class StorageDB {
       CREATE INDEX IF NOT EXISTS idx_events_status ON webhook_events(processing_status);
       CREATE INDEX IF NOT EXISTS idx_events_task_id ON webhook_events(task_id);
       CREATE INDEX IF NOT EXISTS idx_events_received_at ON webhook_events(received_at);
+
+      CREATE TABLE IF NOT EXISTS daemon_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
     `);
   }
 
@@ -143,20 +149,23 @@ export class StorageDB {
     return Number(result.lastInsertRowid);
   }
 
-  getPendingTasks(limit: number = 10, tagFilter?: string): PendingTaskItem[] {
+  getPendingTasks(limit: number = 10, tagFilter?: string, includeHistory: boolean = false): PendingTaskItem[] {
     let query = `
       SELECT
-        e.id as event_id,
-        e.task_id,
+        t.id as task_id,
         t.name,
         t.status,
         t.tags,
         t.description,
-        e.event_type,
-        e.history_items,
-        e.received_at
-      FROM webhook_events e
-      JOIN tasks t ON e.task_id = t.id
+        t.url,
+        json_group_array(e.id) as event_ids_json,
+        COUNT(e.id) as event_count,
+        (SELECT event_type FROM webhook_events WHERE task_id = t.id AND processing_status = 'pending' ORDER BY received_at DESC, id DESC LIMIT 1) as latest_event,
+        (SELECT history_items FROM webhook_events WHERE task_id = t.id AND processing_status = 'pending' ORDER BY received_at DESC, id DESC LIMIT 1) as latest_history,
+        MAX(e.received_at) as latest_received_at,
+        MIN(e.id) as first_event_id
+      FROM tasks t
+      JOIN webhook_events e ON e.task_id = t.id
       WHERE e.processing_status = 'pending'
     `;
 
@@ -167,20 +176,23 @@ export class StorageDB {
       params.push(tagFilter);
     }
 
-    query += ` ORDER BY e.received_at ASC, e.id ASC LIMIT ?`;
+    query += ` GROUP BY t.id ORDER BY latest_received_at ASC, first_event_id ASC LIMIT ?`;
     params.push(limit);
 
     const stmt = this.db.prepare(query);
     const rows = stmt.all(...params) as Array<{
-      event_id: number | bigint;
       task_id: string;
       name: string;
       status: string;
       tags: string;
       description: string | null;
-      event_type: string;
-      history_items: string | null;
-      received_at: number | bigint;
+      url: string | null;
+      event_ids_json: string;
+      event_count: number | bigint;
+      latest_event: string | null;
+      latest_history: string | null;
+      latest_received_at: number | bigint;
+      first_event_id: number | bigint;
     }>;
 
     return rows.map((row) => {
@@ -191,23 +203,37 @@ export class StorageDB {
         tags = [];
       }
 
+      let eventIds: number[] = [];
+      try {
+        eventIds = JSON.parse(row.event_ids_json || '[]').map((id: any) => Number(id));
+      } catch {
+        eventIds = [];
+      }
+
       let historyItems: any[] = [];
       try {
-        historyItems = JSON.parse(row.history_items || '[]');
+        historyItems = JSON.parse(row.latest_history || '[]');
       } catch {
         historyItems = [];
       }
 
+      const firstId = Number(row.first_event_id);
+      const latestEvent = row.latest_event ? String(row.latest_event) : 'taskUpdated';
+
       return {
-        event_id: Number(row.event_id),
+        event_id: firstId,
         task_id: String(row.task_id),
         name: String(row.name),
         status: String(row.status),
         tags,
         description: row.description !== null ? String(row.description) : null,
-        event_type: String(row.event_type),
+        url: row.url !== null ? String(row.url) : null,
+        event_ids: eventIds,
+        latest_event: latestEvent,
+        event_type: latestEvent,
+        event_count: Number(row.event_count),
+        received_at: new Date(Number(row.latest_received_at)).toISOString(),
         history_items: historyItems,
-        received_at: new Date(Number(row.received_at)).toISOString(),
       };
     });
   }
@@ -224,6 +250,56 @@ export class StorageDB {
 
     const result = stmt.run(status, notes ?? null, processedAt, eventId);
     return Number(result.changes) > 0;
+  }
+
+  markTaskStatus(taskId: string, status: ProcessingStatus, notes?: string): number {
+    const processedAt = status === 'pending' ? null : Date.now();
+    const stmt = this.db.prepare(`
+      UPDATE webhook_events
+      SET processing_status = ?,
+          agent_notes = COALESCE(?, agent_notes),
+          processed_at = ?
+      WHERE task_id = ? AND processing_status = 'pending';
+    `);
+
+    const result = stmt.run(status, notes ?? null, processedAt, taskId);
+    return Number(result.changes);
+  }
+
+  setDaemonState(state: {
+    active: boolean;
+    pid: number;
+    tunnel_url: string | null;
+    webhook_id: string | null;
+    team_id: string | null;
+    port: number;
+  }): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO daemon_state (key, value, updated_at)
+      VALUES ('current', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;
+    `);
+    stmt.run(JSON.stringify(state), Date.now());
+  }
+
+  getDaemonState(): {
+    active: boolean;
+    pid?: number;
+    tunnel_url: string | null;
+    webhook_id: string | null;
+    team_id: string | null;
+    port?: number;
+    updated_at: number;
+  } | null {
+    try {
+      const stmt = this.db.prepare('SELECT value, updated_at FROM daemon_state WHERE key = ?');
+      const row = stmt.get('current') as { value: string; updated_at: number | bigint } | undefined;
+      if (!row) return null;
+      const parsed = JSON.parse(row.value);
+      return { ...parsed, updated_at: Number(row.updated_at) };
+    } catch {
+      return null;
+    }
   }
 
   getTaskById(taskId: string): { task: TaskRecord | null; events: WebhookEventRecord[] } {

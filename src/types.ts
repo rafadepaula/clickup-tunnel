@@ -32,9 +32,13 @@ export interface PendingTaskItem {
   status: string;
   tags: string[];
   description: string | null;
+  url?: string | null;
+  event_ids: number[];
+  latest_event: string;
   event_type: string;
-  history_items: any[];
+  event_count: number;
   received_at: string;
+  history_items?: any[];
 }
 
 export interface TunnelStatus {

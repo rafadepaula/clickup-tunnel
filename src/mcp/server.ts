@@ -23,7 +23,7 @@ export interface ClickUpTunnelMcpServerOptions {
 const TOOLS = [
   {
     name: 'get_pending_tasks',
-    description: 'Retrieve pending tasks/events for agent action (supports limit and tag filter)',
+    description: 'Retrieve pending tasks for agent action, deduplicated and token-optimized (omits verbose history)',
     inputSchema: {
       type: 'object',
       properties: {
@@ -40,13 +40,17 @@ const TOOLS = [
   },
   {
     name: 'mark_task_processed',
-    description: 'Mark event status (processed | failed | ignored) with optional notes',
+    description: 'Mark task or event status (processed | failed | ignored). Accepts task_id (to clear all pending events for that task) or specific event_id.',
     inputSchema: {
       type: 'object',
       properties: {
+        task_id: {
+          type: 'string',
+          description: 'ClickUp task ID (e.g. 86e3jq5f1). Marks ALL pending events for this task at once.',
+        },
         event_id: {
           type: 'number',
-          description: 'ID of the webhook event to update',
+          description: 'Specific webhook event ID to update (optional if task_id is provided)',
         },
         status: {
           type: 'string',
@@ -156,33 +160,35 @@ export class ClickUpTunnelMcpServer {
 
   private handleGetPendingTasks(args: any): CallToolResult {
     const limit = typeof args?.limit === 'number' ? args.limit : 10;
-    const tag = typeof args?.tag === 'string' ? args.tag : undefined;
+    const tag = typeof args?.tag === 'string' && args.tag.trim().length > 0 ? args.tag.trim() : undefined;
 
     const tasks = this.db.getPendingTasks(limit, tag);
+    const cleanTasks = tasks.map((t) => ({
+      task_id: t.task_id,
+      name: t.name,
+      status: t.status,
+      tags: t.tags,
+      description: t.description,
+      url: t.url,
+      event_id: t.event_id,
+      event_type: t.latest_event,
+      latest_event: t.latest_event,
+      event_count: t.event_count,
+      event_ids: t.event_ids,
+      received_at: t.received_at,
+    }));
+
     return {
       content: [
         {
           type: 'text',
-          text: JSON.stringify(tasks, null, 2),
+          text: JSON.stringify(cleanTasks, null, 2),
         },
       ],
     };
   }
 
   private handleMarkTaskProcessed(args: any): CallToolResult {
-    if (args?.event_id === undefined || typeof args.event_id !== 'number') {
-      return {
-        isError: true,
-        content: [
-          {
-            type: 'text',
-            text: 'Missing or invalid required parameter: event_id (must be a number)',
-          },
-        ],
-      };
-    }
-
-    const eventId = args.event_id;
     const allowedStatuses: ProcessingStatus[] = [
       'processed',
       'failed',
@@ -205,25 +211,54 @@ export class ClickUpTunnelMcpServer {
     }
 
     const notes = args?.notes !== undefined && args?.notes !== null ? String(args.notes) : undefined;
-    const updated = this.db.markEventStatus(eventId, status, notes);
 
-    if (!updated) {
+    // Support marking by task_id (clears all pending events for that task at once)
+    if (args?.task_id && typeof args.task_id === 'string' && args.task_id.trim().length > 0) {
+      const taskId = args.task_id.trim();
+      const count = this.db.markTaskStatus(taskId, status, notes);
       return {
-        isError: true,
         content: [
           {
             type: 'text',
-            text: `Event #${eventId} not found.`,
+            text: `Successfully marked ${count} pending event(s) for task #${taskId} as '${status}'.`,
+          },
+        ],
+      };
+    }
+
+    // Support marking by specific event_id
+    if (typeof args?.event_id === 'number') {
+      const eventId = args.event_id;
+      const updated = this.db.markEventStatus(eventId, status, notes);
+
+      if (!updated) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: `Event #${eventId} not found.`,
+            },
+          ],
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Event #${eventId} successfully marked as '${status}'.`,
           },
         ],
       };
     }
 
     return {
+      isError: true,
       content: [
         {
           type: 'text',
-          text: `Event #${eventId} successfully marked as '${status}'.`,
+          text: 'Missing required parameter: provide either task_id (string) or event_id (number)',
         },
       ],
     };
@@ -285,11 +320,23 @@ export class ClickUpTunnelMcpServer {
   private handleGetTunnelStatus(_args: any): CallToolResult {
     const pendingCount = this.db.getPendingCount();
     const dynamic = this.options.getStatus ? this.options.getStatus() : {};
+    const persisted = this.db.getDaemonState();
+
+    let isDaemonRunning = false;
+    if (persisted?.pid) {
+      try {
+        process.kill(persisted.pid, 0);
+        isDaemonRunning = true;
+      } catch {
+        isDaemonRunning = false;
+      }
+    }
 
     const tunnelUrl =
       dynamic.tunnel_url !== undefined
         ? dynamic.tunnel_url
         : (this.options.tunnelUrl ??
+          (isDaemonRunning && persisted?.active ? persisted.tunnel_url : null) ??
           process.env.WEBHOOK_PUBLIC_URL ??
           process.env.TUNNEL_URL ??
           null);
@@ -297,17 +344,26 @@ export class ClickUpTunnelMcpServer {
     const webhookId =
       dynamic.webhook_id !== undefined
         ? dynamic.webhook_id
-        : (this.options.webhookId ?? process.env.CLICKUP_WEBHOOK_ID ?? null);
+        : (this.options.webhookId ??
+          (isDaemonRunning && persisted?.active ? persisted.webhook_id : null) ??
+          process.env.CLICKUP_WEBHOOK_ID ??
+          null);
 
     const teamId =
       dynamic.team_id !== undefined
         ? dynamic.team_id
-        : (this.options.teamId ?? process.env.CLICKUP_TEAM_ID ?? null);
+        : (this.options.teamId ??
+          (isDaemonRunning && persisted?.active ? persisted.team_id : null) ??
+          process.env.CLICKUP_TEAM_ID ??
+          null);
 
     const active =
       dynamic.active !== undefined
         ? Boolean(dynamic.active)
-        : Boolean(tunnelUrl);
+        : Boolean(
+            this.options.tunnelUrl ||
+            (isDaemonRunning && persisted?.active && Boolean(persisted.tunnel_url))
+          );
 
     const status: TunnelStatus = {
       active,
