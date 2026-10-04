@@ -10,6 +10,7 @@ import {
   showStatus,
   cleanWebhooks,
   runCli,
+  VERSION,
 } from '../src/cli.js';
 import { StorageDB } from '../src/storage/db.js';
 import { ClickUpClient } from '../src/clickup/client.js';
@@ -303,7 +304,7 @@ describe('Task 7: CLI Entrypoint & Library Exports', () => {
         const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
         const code = await runCli(['version']);
         expect(code).toBe(0);
-        expect(consoleLogSpy).toHaveBeenCalledWith('1.0.0');
+        expect(consoleLogSpy).toHaveBeenCalledWith(VERSION);
       });
 
       it('handles "help" command and returns 0', async () => {
