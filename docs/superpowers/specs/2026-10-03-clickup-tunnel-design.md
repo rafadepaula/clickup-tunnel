@@ -70,7 +70,7 @@ flowchart TD
    - On exit (`SIGINT`/`SIGTERM`), calls ClickUp API to delete registered webhook and terminates child process.
 
 4. **ClickUp Client & Enricher (`src/clickup/client.ts`)**:
-   - Reads `CLICKUP_API_TOKEN` from environment variable or `.env` file (with local fallback to `../mcp/clickup/token.txt` if present).
+   - Reads `CLICKUP_API_TOKEN` strictly from environment variable `CLICKUP_API_TOKEN`, `.env` file, or `--token` CLI argument (NO hardcoded paths or filesystem fallbacks, strictly secure for public distribution).
    - Auto-discovers Team ID (`/api/v2/team`) if `CLICKUP_TEAM_ID` is not explicitly set.
    - Webhook registration: `POST /api/v2/team/{team_id}/webhook` with events `taskCreated` and `taskUpdated`.
    - Task fetching: `GET /api/v2/task/{task_id}` to retrieve name, status, tags (marcadores), description, assignees, custom fields.
