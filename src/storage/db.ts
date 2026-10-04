@@ -203,7 +203,7 @@ export class StorageDB {
     const stmt = this.db.prepare(`
       UPDATE webhook_events
       SET processing_status = ?,
-          agent_notes = ?,
+          agent_notes = COALESCE(?, agent_notes),
           processed_at = ?
       WHERE id = ?;
     `);

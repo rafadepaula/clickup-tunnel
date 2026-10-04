@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { StorageDB } from '../src/storage/db.js';
 import type { TaskRecord, WebhookEventRecord } from '../src/types.js';
 import fs from 'node:fs';
@@ -65,14 +65,24 @@ describe('StorageDB', () => {
       const originalEnv = process.env.CLICKUP_TUNNEL_DB;
       delete process.env.CLICKUP_TUNNEL_DB;
 
-      const expectedDir = path.join(os.homedir(), '.clickup-tunnel');
-      // Create a test instance with undefined path to verify it defaults to home directory path
-      const defaultDb = new StorageDB();
-      expect(fs.existsSync(expectedDir)).toBe(true);
-      defaultDb.close();
+      const testTmpDir = path.join(os.tmpdir(), `clickup-test-home-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(testTmpDir);
 
-      if (originalEnv !== undefined) {
-        process.env.CLICKUP_TUNNEL_DB = originalEnv;
+      try {
+        const expectedDir = path.join(testTmpDir, '.clickup-tunnel');
+        const expectedDbPath = path.join(expectedDir, 'events.db');
+
+        // Create a test instance with undefined path to verify it defaults to home directory path
+        const defaultDb = new StorageDB();
+        expect(fs.existsSync(expectedDir)).toBe(true);
+        expect(fs.existsSync(expectedDbPath)).toBe(true);
+        defaultDb.close();
+      } finally {
+        homedirSpy.mockRestore();
+        if (originalEnv !== undefined) {
+          process.env.CLICKUP_TUNNEL_DB = originalEnv;
+        }
+        fs.rmSync(testTmpDir, { recursive: true, force: true });
       }
     });
   });
@@ -325,6 +335,44 @@ describe('StorageDB', () => {
     it('returns false when marking a non-existent event', () => {
       const updated = db.markEventStatus(999999, 'processed');
       expect(updated).toBe(false);
+    });
+
+    it('preserves existing agent_notes when notes is undefined on subsequent status change', () => {
+      db.saveTask({
+        id: 'task-302',
+        name: 'Task 302',
+        status: 'open',
+        tags: [],
+        description: null,
+        url: null,
+        list_id: null,
+        list_name: null,
+        raw_json: '{}',
+        created_at: 1000,
+      });
+
+      const eventId = db.insertEvent('task-302', 'taskCreated', []);
+
+      // Set initial status with notes
+      db.markEventStatus(eventId, 'processing', 'Initial processing note');
+      let result = db.getTaskById('task-302');
+      let event = result.events.find((e) => e.id === eventId);
+      expect(event?.processing_status).toBe('processing');
+      expect(event?.agent_notes).toBe('Initial processing note');
+
+      // Update status without notes - should preserve existing notes
+      db.markEventStatus(eventId, 'processed');
+      result = db.getTaskById('task-302');
+      event = result.events.find((e) => e.id === eventId);
+      expect(event?.processing_status).toBe('processed');
+      expect(event?.agent_notes).toBe('Initial processing note');
+
+      // Update status with new notes - should overwrite
+      db.markEventStatus(eventId, 'failed', 'Updated failure note');
+      result = db.getTaskById('task-302');
+      event = result.events.find((e) => e.id === eventId);
+      expect(event?.processing_status).toBe('failed');
+      expect(event?.agent_notes).toBe('Updated failure note');
     });
   });
 
