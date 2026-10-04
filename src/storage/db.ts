@@ -116,16 +116,30 @@ export class StorageDB {
     );
   }
 
-  insertEvent(taskId: string, eventType: string, historyItems: any[]): number {
+  /**
+   * Checks whether a task exists in the local database.
+   */
+  hasTask(taskId: string): boolean {
+    const stmt = this.db.prepare('SELECT 1 FROM tasks WHERE id = ? LIMIT 1');
+    return stmt.get(taskId) !== undefined;
+  }
+
+  insertEvent(
+    taskId: string,
+    eventType: string,
+    historyItems: any[],
+    status: ProcessingStatus = 'pending'
+  ): number {
     const receivedAt = Date.now();
     const historyJson = JSON.stringify(historyItems || []);
+    const processedAt = status === 'pending' ? null : receivedAt;
     const stmt = this.db.prepare(`
       INSERT INTO webhook_events (
         task_id, event_type, history_items, processing_status, agent_notes, received_at, processed_at
-      ) VALUES (?, ?, ?, 'pending', NULL, ?, NULL);
+      ) VALUES (?, ?, ?, ?, NULL, ?, ?);
     `);
 
-    const result = stmt.run(taskId, eventType, historyJson, receivedAt);
+    const result = stmt.run(taskId, eventType, historyJson, status, receivedAt, processedAt);
     return Number(result.lastInsertRowid);
   }
 

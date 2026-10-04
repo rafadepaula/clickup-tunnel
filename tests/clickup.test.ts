@@ -439,4 +439,62 @@ describe('ClickUpClient', () => {
       );
     });
   });
+
+  describe('getRecentTasks', () => {
+    it('queries tasks with default parameters (subtasks=true, include_closed=false, order_by=updated, reverse=true)', async () => {
+      const client = new ClickUpClient('pk_test_token');
+      const mockTasks = [
+        { id: 't1', name: 'Task 1', status: { status: 'to do' } },
+        { id: 't2', name: 'Task 2', status: { status: 'in progress' } },
+      ];
+
+      fetchSpy.mockResolvedValueOnce(
+        new Response(JSON.stringify({ tasks: mockTasks }), { status: 200 })
+      );
+
+      const tasks = await client.getRecentTasks('team_99');
+
+      expect(tasks).toEqual(mockTasks);
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://api.clickup.com/api/v2/team/team_99/task?subtasks=true&include_closed=false&order_by=updated&reverse=true',
+        expect.objectContaining({
+          method: 'GET',
+          headers: expect.objectContaining({
+            Authorization: 'pk_test_token',
+          }),
+        })
+      );
+    });
+
+    it('passes custom query parameters correctly', async () => {
+      const client = new ClickUpClient('pk_test_token');
+      fetchSpy.mockResolvedValueOnce(
+        new Response(JSON.stringify({ tasks: [] }), { status: 200 })
+      );
+
+      await client.getRecentTasks('team_123', {
+        includeClosed: true,
+        subtasks: false,
+        orderBy: 'created',
+        reverse: false,
+        page: 3,
+      });
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://api.clickup.com/api/v2/team/team_123/task?subtasks=false&include_closed=true&order_by=created&reverse=false&page=3',
+        expect.any(Object)
+      );
+    });
+
+    it('returns empty array when tasks key is omitted or not an array', async () => {
+      const client = new ClickUpClient('pk_test_token');
+      fetchSpy.mockResolvedValueOnce(
+        new Response(JSON.stringify({}), { status: 200 })
+      );
+
+      const tasks = await client.getRecentTasks('team_empty');
+      expect(tasks).toEqual([]);
+    });
+  });
 });
+

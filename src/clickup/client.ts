@@ -171,4 +171,34 @@ export class ClickUpClient {
       endpoint: String(w.endpoint),
     }));
   }
+
+  async getRecentTasks(
+    teamId: string,
+    options: GetRecentTasksOptions = {}
+  ): Promise<ClickUpTaskDetail[]> {
+    const encodedTeamId = encodeURIComponent(teamId);
+    const params = new URLSearchParams();
+    params.set('subtasks', String(options.subtasks ?? true));
+    params.set('include_closed', String(options.includeClosed ?? false));
+    params.set('order_by', options.orderBy ?? 'updated');
+    params.set('reverse', String(options.reverse ?? true));
+    if (options.page !== undefined) {
+      params.set('page', String(options.page));
+    }
+
+    const data = await this.request<{ tasks?: ClickUpTaskDetail[] }>(
+      `/team/${encodedTeamId}/task?${params.toString()}`,
+      { method: 'GET' }
+    );
+
+    return Array.isArray(data.tasks) ? data.tasks : [];
+  }
+}
+
+export interface GetRecentTasksOptions {
+  subtasks?: boolean;
+  includeClosed?: boolean;
+  orderBy?: string;
+  reverse?: boolean;
+  page?: number;
 }

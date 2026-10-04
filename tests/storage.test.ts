@@ -158,6 +158,26 @@ describe('StorageDB', () => {
       expect(result.task?.tags).toEqual(['v1', 'completed']);
       expect(result.task?.description).toBe('Updated description');
     });
+
+    it('hasTask accurately reports whether task exists in db', () => {
+      expect(db.hasTask('non-existent-task')).toBe(false);
+
+      db.saveTask({
+        id: 'task-exists-1',
+        name: 'Existing Task',
+        status: 'open',
+        tags: [],
+        description: null,
+        url: null,
+        list_id: null,
+        list_name: null,
+        raw_json: '{}',
+        created_at: Date.now(),
+      });
+
+      expect(db.hasTask('task-exists-1')).toBe(true);
+      expect(db.hasTask('non-existent-task')).toBe(false);
+    });
   });
 
   describe('insertEvent and getPendingTasks', () => {
@@ -193,6 +213,33 @@ describe('StorageDB', () => {
       expect(pending[0].history_items).toEqual(history);
       // received_at should be ISO string
       expect(new Date(pending[0].received_at).toISOString()).toBe(pending[0].received_at);
+    });
+
+    it('supports inserting event with initial non-pending status', () => {
+      db.saveTask({
+        id: 'task-closed-1',
+        name: 'Closed Task',
+        status: 'closed',
+        tags: [],
+        description: null,
+        url: null,
+        list_id: null,
+        list_name: null,
+        raw_json: '{}',
+        created_at: Date.now(),
+      });
+
+      const eventId = db.insertEvent('task-closed-1', 'taskCreated', [], 'processed');
+      expect(eventId).toBeGreaterThan(0);
+
+      // Should NOT show in getPendingTasks
+      expect(db.getPendingTasks()).toHaveLength(0);
+
+      // Should show in task events with processed status
+      const res = db.getTaskById('task-closed-1');
+      expect(res.events).toHaveLength(1);
+      expect(res.events[0].processing_status).toBe('processed');
+      expect(res.events[0].processed_at).not.toBeNull();
     });
 
     it('retrieves event history in getTaskById', () => {

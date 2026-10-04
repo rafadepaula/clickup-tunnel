@@ -7,17 +7,17 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import { StorageDB } from './storage/db.js';
-import { ClickUpClient } from './clickup/client.js';
+import { ClickUpClient, type GetRecentTasksOptions } from './clickup/client.js';
 import { TunnelManager } from './tunnel/cloudflared.js';
 import { NgrokManager } from './tunnel/ngrok.js';
-import { WebhookServer } from './server/webhook.js';
+import { WebhookServer, convertTaskDetail } from './server/webhook.js';
 import { ClickUpTunnelMcpServer } from './mcp/server.js';
 
 // Automatically load .env file
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-let pkgVersion = '1.0.4';
+let pkgVersion = '1.0.6';
 try {
   const pkgJsonPath = path.resolve(__dirname, '../package.json');
   if (fs.existsSync(pkgJsonPath)) {
@@ -36,11 +36,13 @@ export interface CliOptions {
   team?: string;
   url?: string;
   tunnel?: 'ngrok' | 'cloudflared';
+  includeClosed?: boolean;
+  noSync?: boolean;
   help?: boolean;
   version?: boolean;
 }
 
-export type CliCommand = 'start' | 'mcp' | 'status' | 'clean' | 'help' | 'version';
+export type CliCommand = 'start' | 'mcp' | 'status' | 'clean' | 'sync' | 'help' | 'version';
 
 export interface ParsedCliArgs {
   command: CliCommand;
@@ -64,6 +66,68 @@ export interface DaemonOverrides {
   autoListenSignals?: boolean;
 }
 
+export interface SyncOptions {
+  includeClosed?: boolean;
+  subtasks?: boolean;
+  page?: number;
+}
+
+export interface SyncResult {
+  totalFetched: number;
+  newTasksCount: number;
+  taskIds: string[];
+}
+
+/**
+ * Queries recent ClickUp tasks and backfills any that do not already exist
+ * in the local SQLite database.
+ */
+export async function syncMissingTasks(
+  clickup: ClickUpClient,
+  teamId: string,
+  db: StorageDB,
+  options: SyncOptions = {}
+): Promise<SyncResult> {
+  if (typeof clickup.getRecentTasks !== 'function') {
+    return { totalFetched: 0, newTasksCount: 0, taskIds: [] };
+  }
+
+  const tasks = await clickup.getRecentTasks(teamId, {
+    includeClosed: options.includeClosed ?? false,
+    subtasks: options.subtasks ?? true,
+    page: options.page,
+    orderBy: 'updated',
+    reverse: true,
+  });
+
+  const newTasks: string[] = [];
+  for (const task of tasks) {
+    const taskId = String(task.id);
+    if (!db.hasTask(taskId)) {
+      const record = convertTaskDetail(task);
+      db.saveTask(record);
+
+      const statusType = task.status && typeof task.status === 'object' ? (task.status as any).type : undefined;
+      const isClosed = statusType === 'closed' || statusType === 'done' || Boolean(task.date_closed);
+      const initialStatus = isClosed ? 'processed' : 'pending';
+
+      db.insertEvent(
+        taskId,
+        'taskCreated',
+        [{ field: 'backfill', source: 'startup_sync' }],
+        initialStatus
+      );
+      newTasks.push(taskId);
+    }
+  }
+
+  return {
+    totalFetched: tasks.length,
+    newTasksCount: newTasks.length,
+    taskIds: newTasks,
+  };
+}
+
 /**
  * Parses command-line arguments into a command and typed options.
  */
@@ -75,6 +139,8 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     team: { type: 'string' },
     url: { type: 'string' },
     tunnel: { type: 'string' },
+    'include-closed': { type: 'boolean' },
+    'no-sync': { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
     version: { type: 'boolean', short: 'v' },
   } as const;
@@ -102,6 +168,8 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     command = 'status';
   } else if (rawCommand === 'clean') {
     command = 'clean';
+  } else if (rawCommand === 'sync') {
+    command = 'sync';
   }
 
   const portNum = parsed.values.port ? Number(parsed.values.port) : undefined;
@@ -113,6 +181,8 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     team: parsed.values.team as string | undefined,
     url: parsed.values.url as string | undefined,
     tunnel: parsed.values.tunnel === 'cloudflared' || parsed.values.tunnel === 'ngrok' ? parsed.values.tunnel : undefined,
+    includeClosed: Boolean(parsed.values['include-closed']),
+    noSync: Boolean(parsed.values['no-sync']),
     help: Boolean(parsed.values.help),
     version: Boolean(parsed.values.version),
   };
@@ -165,14 +235,15 @@ function resolveDbPathDisplay(dbPath?: string): string {
  */
 export function printHelp(): void {
   console.log(`
-clickup-tunnel - ClickUp Webhook Cloudflare Tunnel with SQLite queue and MCP Server
+clickup-tunnel - ClickUp Webhook Tunnel with SQLite queue and MCP Server
 
 Usage: clickup-tunnel <command> [options]
 
 Commands:
-  start       Start webhook daemon, launch Cloudflare tunnel, and register webhook in ClickUp
+  start       Start webhook daemon, launch tunnel, sync missing tasks, and register webhook in ClickUp
   mcp         Start stdio MCP server for AI agents to query and process tasks
   status      Display SQLite database statistics and recent events
+  sync        Sync recent tasks from ClickUp and backfill missing tasks into SQLite
   clean       Remove trycloudflare/clickup-tunnel webhooks from ClickUp
   help        Show this help message
 
@@ -183,6 +254,8 @@ Options:
       --team <id>       ClickUp Team/Workspace ID (or CLICKUP_TEAM_ID env var)
       --url <url>       Public webhook URL override (skips quick tunnel)
       --tunnel <type>   Tunnel provider: 'ngrok' (default) or 'cloudflared'
+      --include-closed  Include closed/done tasks during sync (default: false)
+      --no-sync         Skip automatic initial sync on start
   -h, --help            Show help
   -v, --version         Show version
 `);
@@ -283,6 +356,22 @@ export async function startDaemon(
   Agent Command: npx @rafadepaula/clickup-tunnel mcp
 ================================================================================
 `);
+
+  // Backfill any recent ClickUp tasks missing from local SQLite (lost notifications)
+  if (!options.noSync) {
+    try {
+      const syncResult = await syncMissingTasks(clickup, teamId, db, {
+        includeClosed: options.includeClosed,
+      });
+      if (syncResult.newTasksCount > 0) {
+        console.log(`[Sync] Backfilled ${syncResult.newTasksCount} missing task(s) from ClickUp into SQLite queue.`);
+      } else {
+        console.log(`[Sync] SQLite database is up to date (${syncResult.totalFetched} recent tasks checked).`);
+      }
+    } catch (syncErr: any) {
+      console.warn(`[Sync] Warning: Failed to sync recent tasks on startup:`, syncErr?.message || syncErr);
+    }
+  }
 
   let shuttingDown = false;
   const shutdown = async () => {
@@ -481,6 +570,32 @@ export async function runCli(argv: string[]): Promise<number> {
         const teamId = await resolveTeamId(options, client);
         await cleanWebhooks(client, teamId);
         return 0;
+      }
+      case 'sync': {
+        const token = resolveToken(options);
+        if (!token) {
+          console.error(
+            'Error: CLICKUP_API_TOKEN is required. Provide it via the --token flag, CLICKUP_API_TOKEN environment variable, or a .env file.'
+          );
+          return 1;
+        }
+        const client = new ClickUpClient(token);
+        const teamId = await resolveTeamId(options, client);
+        const db = new StorageDB(options.db);
+        try {
+          const syncResult = await syncMissingTasks(client, teamId, db, {
+            includeClosed: options.includeClosed,
+          });
+          console.log(`[Sync] Checked ${syncResult.totalFetched} recent tasks in ClickUp.`);
+          if (syncResult.newTasksCount > 0) {
+            console.log(`[Sync] Backfilled ${syncResult.newTasksCount} missing task(s) into SQLite database.`);
+          } else {
+            console.log(`[Sync] SQLite database is up to date (0 missing).`);
+          }
+          return 0;
+        } finally {
+          db.close();
+        }
       }
       case 'mcp': {
         await startMcp(options);

@@ -3,10 +3,10 @@
 [![npm version](https://img.shields.io/npm/v/@rafadepaula/clickup-tunnel.svg)](https://www.npmjs.com/package/@rafadepaula/clickup-tunnel)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
-[![Tests](https://img.shields.io/badge/tests-130%20passing-brightgreen.svg)](https://github.com/rafadepaula/clickup-tunnel)
+[![Tests](https://img.shields.io/badge/tests-145%20passing-brightgreen.svg)](https://github.com/rafadepaula/clickup-tunnel)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7+-blue.svg)](https://www.typescriptlang.org/)
 
-> **Bridge ClickUp webhooks seamlessly into local AI agents (Claude Desktop, Antigravity, Cursor, Codex) using Cloudflare Quick Tunnels, native SQLite (`node:sqlite`), and the Model Context Protocol (MCP).**
+> **Bridge ClickUp webhooks seamlessly into local AI agents (Claude Desktop, Antigravity, Cursor, Codex) using Ngrok / Cloudflare Tunnels, native SQLite (`node:sqlite`), automatic startup backfill for lost notifications, and the Model Context Protocol (MCP).**
 
 ---
 
@@ -25,14 +25,16 @@ When building AI workflows, autonomous coding agents, or team assistants that re
 - Your local development machine or desktop agent is behind NAT/firewalls without a public IP.
 - Setting up cloud webhooks requires configuring public lambdas, API gateways, databases, and continuous synchronization.
 - Exposing ports via temporary URLs often leaves stale, broken webhooks inside your ClickUp workspace.
+- **Offline gap**: Tasks created or modified while your laptop was asleep or tunnel was disconnected are lost.
 
 **`@rafadepaula/clickup-tunnel`** solves this end-to-end with zero infrastructure:
-1. **Cloudflare Quick Tunnel**: Spawns an encrypted `trycloudflare.com` tunnel (or connects your custom domain) on the fly via `cloudflared`.
+1. **Tunnel Provider**: Starts an encrypted tunnel via `ngrok` (default, compatible with ClickUp webhook policy) or `cloudflared` (or custom `--url`).
 2. **Auto-Registration**: Automatically registers the public tunnel webhook endpoint in your ClickUp workspace using your API token.
-3. **Data Enrichment**: When task events arrive (`taskCreated`, `taskUpdated`, `taskStatusUpdated`, etc.), it automatically queries the ClickUp REST API to retrieve full task metadata (name, status, tags, custom fields, description).
-4. **Local SQLite Queue**: Stores events and task states in a local SQLite database (`node:sqlite` in WAL mode) with transaction safety and concurrency protection.
-5. **Model Context Protocol (MCP) Server**: Provides a standard stdio MCP server for Claude Desktop, Antigravity, Cursor, and custom agent loops to query pending tasks, inspect histories, and mark tasks as processed.
-6. **Clean Teardown**: Upon stopping (`Ctrl+C` or `SIGTERM`), it automatically removes the registered webhook from ClickUp, preventing orphaned webhooks.
+3. **Automatic Startup Backfill**: On startup, immediately queries recent ClickUp tasks and backfills any missing tasks into the SQLite queue so no lost notifications are missed.
+4. **Data Enrichment**: When task events arrive (`taskCreated`, `taskUpdated`, `taskStatusUpdated`, etc.), it automatically queries the ClickUp REST API to retrieve full task metadata (name, status, tags, custom fields, description).
+5. **Local SQLite Queue**: Stores events and task states in a local SQLite database (`node:sqlite` in WAL mode) with transaction safety and concurrency protection.
+6. **Model Context Protocol (MCP) Server**: Provides a standard stdio MCP server for Claude Desktop, Antigravity, Cursor, and custom agent loops to query pending tasks, inspect histories, and mark tasks as processed.
+7. **Clean Teardown**: Upon stopping (`Ctrl+C` or `SIGTERM`), it automatically removes the registered webhook from ClickUp, preventing orphaned webhooks.
 
 ---
 

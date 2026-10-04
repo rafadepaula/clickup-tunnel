@@ -1,6 +1,6 @@
 // Core classes and errors
 export { StorageDB } from './storage/db.js';
-export { ClickUpClient, ClickUpApiError } from './clickup/client.js';
+export { ClickUpClient, ClickUpApiError, type GetRecentTasksOptions } from './clickup/client.js';
 export {
   TunnelManager,
   findCloudflaredBinary,
@@ -45,6 +45,7 @@ export {
   showStatus,
   cleanWebhooks,
   startMcp,
+  syncMissingTasks,
   resolveToken,
   resolveTeamId,
   printHelp,
@@ -55,4 +56,6 @@ export {
   type ParsedCliArgs,
   type DaemonController,
   type DaemonOverrides,
+  type SyncOptions,
+  type SyncResult,
 } from './cli.js';

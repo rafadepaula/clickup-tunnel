@@ -1,7 +1,7 @@
 {
   "name": "@rafadepaula/clickup-tunnel",
-  "version": "1.0.5",
-  "description": "ClickUp Webhook Cloudflare Tunnel with SQLite queue and MCP Server for AI agents",
+  "version": "1.0.6",
+  "description": "ClickUp Webhook Tunnel with SQLite queue, startup backfill and MCP Server for AI agents",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

@@ -9,6 +9,7 @@ import {
   startDaemon,
   showStatus,
   cleanWebhooks,
+  syncMissingTasks,
   runCli,
   VERSION,
 } from '../src/cli.js';
@@ -98,10 +99,17 @@ describe('Task 7: CLI Entrypoint & Library Exports', () => {
       expect(parseCliArgs(['version']).command).toBe('version');
     });
 
-    it('parses "mcp", "status", and "clean" commands', () => {
+    it('parses "mcp", "status", "clean", and "sync" commands', () => {
       expect(parseCliArgs(['mcp']).command).toBe('mcp');
       expect(parseCliArgs(['status', '--db', ':memory:']).command).toBe('status');
       expect(parseCliArgs(['clean', '--team', '123']).command).toBe('clean');
+      expect(parseCliArgs(['sync', '--team', '123']).command).toBe('sync');
+    });
+
+    it('parses --include-closed and --no-sync options', () => {
+      const parsed = parseCliArgs(['start', '--include-closed', '--no-sync']);
+      expect(parsed.options.includeClosed).toBe(true);
+      expect(parsed.options.noSync).toBe(true);
     });
   });
 
@@ -345,6 +353,165 @@ describe('Task 7: CLI Entrypoint & Library Exports', () => {
         expect(fakeClient.deleteWebhook).not.toHaveBeenCalled();
         const logs = consoleLogSpy.mock.calls.map((c) => c.join(' ')).join('\n');
         expect(logs).toContain('No matching webhooks found to clean');
+      });
+
+      it('handles "sync" command without token and returns 1 with clean error', async () => {
+        delete process.env.CLICKUP_API_TOKEN;
+        const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const code = await runCli(['sync']);
+        expect(code).toBe(1);
+        const errorLogs = consoleErrorSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+        expect(errorLogs).toContain('CLICKUP_API_TOKEN is required');
+      });
+    });
+
+    describe('syncMissingTasks (initial startup sync / lost notifications)', () => {
+      it('fetches tasks from ClickUp and backfills missing ones into SQLite queue', async () => {
+        const db = new StorageDB(':memory:');
+
+        // Pre-populate db with task_1
+        db.saveTask({
+          id: 'task_1',
+          name: 'Already in SQLite',
+          status: 'in progress',
+          tags: [],
+          description: null,
+          url: null,
+          list_id: null,
+          list_name: null,
+          raw_json: '{}',
+          created_at: Date.now(),
+        });
+
+        const mockClient = {
+          getRecentTasks: vi.fn().mockResolvedValue([
+            {
+              id: 'task_1',
+              name: 'Already in SQLite',
+              status: { status: 'in progress' },
+            },
+            {
+              id: 'task_2',
+              name: 'Missing Task 2',
+              status: { status: 'to do' },
+              tags: [{ name: 'frontend' }],
+              description: 'Lost notification task',
+              url: 'https://app.clickup.com/t/task_2',
+              date_created: 1700000000000,
+            },
+            {
+              id: 'task_3',
+              name: 'Finished Task 3',
+              status: { status: 'done', type: 'done' },
+              tags: [],
+              date_closed: 1700000100000,
+            },
+          ]),
+        } as unknown as ClickUpClient;
+
+        const result = await syncMissingTasks(mockClient, 'team_100', db, { includeClosed: true });
+
+        expect(result.totalFetched).toBe(3);
+        expect(result.newTasksCount).toBe(2);
+        expect(result.taskIds).toEqual(['task_2', 'task_3']);
+
+        // Verify task_2 was saved and enqueued as pending
+        expect(db.hasTask('task_2')).toBe(true);
+        const task2Detail = db.getTaskById('task_2');
+        expect(task2Detail.task?.name).toBe('Missing Task 2');
+        expect(task2Detail.task?.tags).toEqual(['frontend']);
+        expect(task2Detail.events).toHaveLength(1);
+        expect(task2Detail.events[0].processing_status).toBe('pending');
+        expect(task2Detail.events[0].event_type).toBe('taskCreated');
+
+        // Verify task_3 was saved with status 'processed' because it's already done
+        expect(db.hasTask('task_3')).toBe(true);
+        const task3Detail = db.getTaskById('task_3');
+        expect(task3Detail.events[0].processing_status).toBe('processed');
+
+        // Only task_2 should be in pending queue
+        const pending = db.getPendingTasks();
+        expect(pending).toHaveLength(1);
+        expect(pending[0].task_id).toBe('task_2');
+
+        db.close();
+      });
+
+      it('automatically runs sync on startDaemon and logs backfill summary', async () => {
+        const db = new StorageDB(':memory:');
+        const mockClient = {
+          getDefaultTeamId: vi.fn().mockResolvedValue('team_sync'),
+          createWebhook: vi.fn().mockResolvedValue({ id: 'wh_sync_1', secret: 'sec' }),
+          deleteWebhook: vi.fn().mockResolvedValue(true),
+          getRecentTasks: vi.fn().mockResolvedValue([
+            { id: 'task_sync_a', name: 'Auto Synced Task', status: { status: 'open' } },
+          ]),
+        } as unknown as ClickUpClient;
+
+        const mockTunnel = {
+          startQuickTunnel: vi.fn().mockResolvedValue('https://mock.trycloudflare.com'),
+          stop: vi.fn().mockResolvedValue(undefined),
+        };
+
+        const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+        const controller = await startDaemon(
+          {
+            token: 'pk_sync_token',
+            port: 0,
+            team: 'team_sync',
+          },
+          {
+            db,
+            clickupClient: mockClient,
+            tunnelManager: mockTunnel as any,
+            autoListenSignals: false,
+          }
+        );
+
+        expect(mockClient.getRecentTasks).toHaveBeenCalledWith(
+          'team_sync',
+          expect.objectContaining({ includeClosed: false })
+        );
+        expect(db.hasTask('task_sync_a')).toBe(true);
+
+        const logs = consoleLogSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+        expect(logs).toContain('[Sync] Backfilled 1 missing task(s) from ClickUp into SQLite queue.');
+
+        await controller.shutdown();
+      });
+
+      it('bypasses startup sync when noSync is true', async () => {
+        const db = new StorageDB(':memory:');
+        const mockClient = {
+          getDefaultTeamId: vi.fn().mockResolvedValue('team_sync'),
+          createWebhook: vi.fn().mockResolvedValue({ id: 'wh_sync_2', secret: 'sec' }),
+          deleteWebhook: vi.fn().mockResolvedValue(true),
+          getRecentTasks: vi.fn(),
+        } as unknown as ClickUpClient;
+
+        const mockTunnel = {
+          startQuickTunnel: vi.fn().mockResolvedValue('https://mock.trycloudflare.com'),
+          stop: vi.fn().mockResolvedValue(undefined),
+        };
+
+        const controller = await startDaemon(
+          {
+            token: 'pk_sync_token',
+            port: 0,
+            team: 'team_sync',
+            noSync: true,
+          },
+          {
+            db,
+            clickupClient: mockClient,
+            tunnelManager: mockTunnel as any,
+            autoListenSignals: false,
+          }
+        );
+
+        expect(mockClient.getRecentTasks).not.toHaveBeenCalled();
+        await controller.shutdown();
       });
     });
   });
