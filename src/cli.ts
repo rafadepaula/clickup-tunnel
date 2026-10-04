@@ -9,6 +9,7 @@ import os from 'node:os';
 import { StorageDB } from './storage/db.js';
 import { ClickUpClient } from './clickup/client.js';
 import { TunnelManager } from './tunnel/cloudflared.js';
+import { NgrokManager } from './tunnel/ngrok.js';
 import { WebhookServer } from './server/webhook.js';
 import { ClickUpTunnelMcpServer } from './mcp/server.js';
 
@@ -16,7 +17,7 @@ import { ClickUpTunnelMcpServer } from './mcp/server.js';
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-let pkgVersion = '1.0.3';
+let pkgVersion = '1.0.4';
 try {
   const pkgJsonPath = path.resolve(__dirname, '../package.json');
   if (fs.existsSync(pkgJsonPath)) {
@@ -34,6 +35,7 @@ export interface CliOptions {
   db?: string;
   team?: string;
   url?: string;
+  tunnel?: 'ngrok' | 'cloudflared';
   help?: boolean;
   version?: boolean;
 }
@@ -56,7 +58,7 @@ export interface DaemonController {
 
 export interface DaemonOverrides {
   clickupClient?: ClickUpClient;
-  tunnelManager?: TunnelManager;
+  tunnelManager?: { startQuickTunnel?: (port: number) => Promise<string>; start?: (port: number) => Promise<string>; stop: () => Promise<void> };
   webhookServer?: WebhookServer;
   db?: StorageDB;
   autoListenSignals?: boolean;
@@ -72,6 +74,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     db: { type: 'string' },
     team: { type: 'string' },
     url: { type: 'string' },
+    tunnel: { type: 'string' },
     help: { type: 'boolean', short: 'h' },
     version: { type: 'boolean', short: 'v' },
   } as const;
@@ -109,6 +112,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     db: parsed.values.db as string | undefined,
     team: parsed.values.team as string | undefined,
     url: parsed.values.url as string | undefined,
+    tunnel: parsed.values.tunnel === 'cloudflared' || parsed.values.tunnel === 'ngrok' ? parsed.values.tunnel : undefined,
     help: Boolean(parsed.values.help),
     version: Boolean(parsed.values.version),
   };
@@ -178,6 +182,7 @@ Options:
       --db <path>       SQLite DB path (default: ~/.clickup-tunnel/events.db)
       --team <id>       ClickUp Team/Workspace ID (or CLICKUP_TEAM_ID env var)
       --url <url>       Public webhook URL override (skips quick tunnel)
+      --tunnel <type>   Tunnel provider: 'ngrok' (default) or 'cloudflared'
   -h, --help            Show help
   -v, --version         Show version
 `);
@@ -214,18 +219,54 @@ export async function startDaemon(
   const listeningPort = await webhookServer.start();
 
   let tunnelUrl: string;
-  let tunnelManager: TunnelManager | null = null;
+  let tunnelManager: { stop: () => Promise<void> } | null = null;
   const customUrl = (options.url || process.env.WEBHOOK_PUBLIC_URL || '').trim();
 
   if (customUrl) {
     tunnelUrl = customUrl.replace(/\/+$/, '');
+  } else if (overrides.tunnelManager) {
+    tunnelManager = overrides.tunnelManager;
+    if ('startQuickTunnel' in tunnelManager && typeof tunnelManager.startQuickTunnel === 'function') {
+      tunnelUrl = await tunnelManager.startQuickTunnel(listeningPort);
+    } else if ('start' in tunnelManager && typeof tunnelManager.start === 'function') {
+      tunnelUrl = await tunnelManager.start(listeningPort);
+    } else {
+      throw new Error('Provided tunnelManager does not implement start or startQuickTunnel');
+    }
   } else {
-    tunnelManager = overrides.tunnelManager ?? new TunnelManager();
-    tunnelUrl = await tunnelManager.startQuickTunnel(listeningPort);
+    // Default to ngrok because ClickUp blocks trycloudflare.com (ECODE: OAUTH_194)
+    const useCloudflared = options.tunnel === 'cloudflared';
+    if (useCloudflared) {
+      const cfManager = new TunnelManager();
+      tunnelManager = cfManager;
+      tunnelUrl = await cfManager.startQuickTunnel(listeningPort);
+    } else {
+      const ngrokMgr = new NgrokManager();
+      tunnelManager = ngrokMgr;
+      tunnelUrl = await ngrokMgr.start(listeningPort);
+    }
   }
 
   const webhookEndpoint = `${tunnelUrl.replace(/\/+$/, '')}/webhook`;
-  const webhook = await clickup.createWebhook(teamId, webhookEndpoint);
+  let webhook: { id: string; secret?: string };
+  try {
+    webhook = await clickup.createWebhook(teamId, webhookEndpoint);
+  } catch (err: any) {
+    if (tunnelManager) {
+      await tunnelManager.stop().catch(() => {});
+    }
+    await webhookServer.stop().catch(() => {});
+    db.close();
+
+    if (err?.message?.includes('Specified URL not allowed')) {
+      throw new Error(
+        `ClickUp rejected webhook URL '${webhookEndpoint}' (Specified URL not allowed). ` +
+        `Note: ClickUp explicitly blocklists trycloudflare.com domains. ` +
+        `Use ngrok (default) or provide a custom domain via --url.`
+      );
+    }
+    throw err;
+  }
   const webhookId = webhook.id;
   const dbDisplay = resolveDbPathDisplay(options.db);
 

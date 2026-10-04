@@ -9,6 +9,11 @@ export {
   type TunnelManagerOptions,
 } from './tunnel/cloudflared.js';
 export {
+  NgrokManager,
+  extractNgrokUrl,
+  type NgrokManagerOptions,
+} from './tunnel/ngrok.js';
+export {
   WebhookServer,
   convertTaskDetail,
   type WebhookServerOptions,
