@@ -1,0 +1,54 @@
+{
+  "name": "@rafadepaula/clickup-tunnel",
+  "version": "1.0.0",
+  "description": "ClickUp Webhook Cloudflare Tunnel with SQLite queue and MCP Server for AI agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "clickup-tunnel": "dist/cli.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rafadepaula/clickup-tunnel.git"
+  },
+  "homepage": "https://github.com/rafadepaula/clickup-tunnel#readme",
+  "bugs": {
+    "url": "https://github.com/rafadepaula/clickup-tunnel/issues"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js start",
+    "dev": "tsx src/cli.ts start",
+    "mcp": "node dist/cli.js mcp",
+    "test": "vitest run",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "clickup",
+    "cloudflare",
+    "cloudflared",
+    "tunnel",
+    "webhook",
+    "mcp",
+    "model-context-protocol",
+    "agents",
+    "ai",
+    "sqlite"
+  ],
+  "author": "Rafael de Paula",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}
