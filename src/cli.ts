@@ -15,7 +15,18 @@ import { ClickUpTunnelMcpServer } from './mcp/server.js';
 // Automatically load .env file
 dotenv.config();
 
-export const VERSION = '1.0.0';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+let pkgVersion = '1.0.3';
+try {
+  const pkgJsonPath = path.resolve(__dirname, '../package.json');
+  if (fs.existsSync(pkgJsonPath)) {
+    const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+    if (pkg.version) pkgVersion = pkg.version;
+  }
+} catch {
+  // fallback to default
+}
+export const VERSION = pkgVersion;
 
 export interface CliOptions {
   token?: string;
